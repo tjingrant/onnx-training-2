@@ -20,6 +20,7 @@ from onnx.backend.base import namedtupledict
 from onnx.backend.test.runner import BackendIsNotSupposedToImplementIt
 from onnx.helper import make_opsetid
 import tensorflow as tf
+import numpy as np
 
 from onnx_tf.backend_rep import TensorflowRep
 from onnx_tf.common import data_type
@@ -30,6 +31,7 @@ from onnx_tf.common.handler_helper import get_all_backend_handlers
 from onnx_tf.pb_wrapper import OnnxNode
 import onnx_tf.common as common
 
+training_flag_name = "_onnx_tf_internal_is_training"
 
 class TensorflowBackend(Backend):
   """ Tensorflow Backend for ONNX
@@ -127,6 +129,11 @@ class TensorflowBackend(Backend):
                                      shape=shape)
         input_dict_items.append((value_info.name, x))
 
+      # create place holder for training flag
+      input_dict_items.append((training_flag_name,
+                              tf.compat.v1.placeholder_with_default(False,
+                                                                    shape=[])))
+
       # tensor dict: this dictionary is a map from variable names
       # to the latest produced TF tensors of the given name.
       # This dictionary will get updated as we build the graph to
@@ -219,12 +226,13 @@ class TensorflowBackend(Backend):
       return name.replace(
           ":", "_tf_") + "_" + get_unique_suffix() if ":" in name else name
 
-    return [(init.name,
-             tf.constant(tensor2list(init),
-                         shape=init.dims,
-                         dtype=data_type.onnx2tf(init.data_type),
-                         name=validate_initializer_name(init.name)))
-            for init in initializer]
+    tensor_dict = [(init.name,
+                    tf.Variable(np.array(tensor2list(init)).reshape(init.dims),
+                                shape=init.dims,
+                                dtype=data_type.onnx2tf(init.data_type),
+                                name=validate_initializer_name(init.name)))
+                   for init in initializer]
+    return tensor_dict
 
   @classmethod
   def _onnx_node_to_tensorflow_op(cls,
@@ -248,11 +256,13 @@ class TensorflowBackend(Backend):
     """
     handlers = handlers or cls._get_handlers(opset)
     if handlers:
-      handler = handlers[node.domain].get(node.op_type, None) if node.domain in handlers else None
+      handler = handlers[node.domain].get(
+          node.op_type, None) if node.domain in handlers else None
       if handler:
         return handler.handle(node, tensor_dict=tensor_dict, strict=strict)
 
-    raise BackendIsNotSupposedToImplementIt("{} is not implemented.".format(node.op_type))
+    raise BackendIsNotSupposedToImplementIt("{} is not implemented.".format(
+        node.op_type))
 
   @classmethod
   def _get_handlers(cls, opset):
@@ -310,7 +320,8 @@ class TensorflowBackend(Backend):
         nodes_outputs.append(o_name)
     for node in subgraph.node:
       for i_name in node.input:
-        if i_name not in nodes_outputs and i_name not in subgraph_tensor_dict.keys():
+        if i_name not in nodes_outputs and i_name not in subgraph_tensor_dict.keys(
+        ):
           subgraph_tensor_dict[i_name] = tensor_dict[i_name]
       onnx_node = OnnxNode(node)
       output_ops = cls._onnx_node_to_tensorflow_op(onnx_node,
